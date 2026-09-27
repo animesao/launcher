@@ -33,6 +33,7 @@ export interface MeshBone {
   /** Углы в градусах, знак x и z перевёрнут вслед за переворотом y. */
   rotation: [number, number, number]
   quads: MeshQuad[]
+  side?: string
 }
 
 interface RawCube {
@@ -51,6 +52,7 @@ interface RawBone {
   pivot?: number[]
   rotation?: number[]
   mirror?: boolean
+  side?: string
   cubes?: RawCube[]
 }
 
@@ -280,6 +282,7 @@ export function readCosmeticMesh(source: unknown, extraInflate = 0): CosmeticMes
       quads: (bone.cubes ?? [])
         .filter((cube) => (cube.size ?? []).some((side) => side !== 0))
         .flatMap((cube) => cubeQuads(cube, bone, pivot, texW, texH, extraInflate)),
+      ...(typeof bone.side === 'string' && bone.side.trim() ? { side: bone.side.trim().toLowerCase() } : {}),
     }
   })
 
