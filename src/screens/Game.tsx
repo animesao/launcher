@@ -5,17 +5,14 @@ import {
   dungeonsInstall,
   dungeonsLaunch,
   dungeonsOpenFolder,
-  dungeonsOwnership,
   dungeonsPickMods,
   dungeonsRemoveMod,
   dungeonsStatus,
   dungeonsToggleMod,
-  gameOwnership,
   openUrl,
   storeGameInstall,
   storeGameOpen,
   storeGamesState,
-  type DungeonsOwnership,
   type DungeonsStatus,
   type StoreGameState,
 } from '../ipc/commands'
@@ -23,7 +20,7 @@ import { hasTauri } from '../ipc/tauri'
 import { GAMES, gameBuyUrl, gameHero, gamePoster, gameSite, useGame, type GameInfo } from '../lib/games'
 import { useAccounts } from '../state/accounts'
 import { runInstall, stopInstall, useInstalls } from '../state/installs'
-import { showToast, useUi } from '../state/ui'
+import { showToast } from '../state/ui'
 import { BedrockServers } from '../components/playhub/BedrockServers'
 import '../styles/pixel/game.css'
 
@@ -84,7 +81,6 @@ export function Game({ on }: { on: boolean }) {
               <PxIcon name="clock" size={18} />
               {game.released}
             </span>
-            {game.slug !== 'education' ? <OwnedChip slug={game.slug} /> : null}
             {game.mods ? (
               <span className="gm-fact">
                 <PxIcon name="box" size={18} />
@@ -92,7 +88,11 @@ export function Game({ on }: { on: boolean }) {
               </span>
             ) : null}
           </div>
-          {game.run === 'mojang' ? <DungeonsActions steam={!!st && st.steam} /> : <Actions game={game} st={st || null} onChanged={() => setTick((t) => t + 1)} />}
+          {game.run === 'mojang' ? (
+            <DungeonsActions game={game} st={st || null} onChanged={() => setTick((t) => t + 1)} />
+          ) : (
+            <Actions game={game} st={st || null} onChanged={() => setTick((t) => t + 1)} />
+          )}
         </div>
         </div>
       </div>
@@ -131,44 +131,6 @@ export function Game({ on }: { on: boolean }) {
   )
 }
 
-/** Владелец 29.09.2026: «нужна лицензия игры — купите в Blups». */
-function LicenceNote({ slug }: { slug: GameInfo['slug'] }) {
-  return (
-    <button className="gm-lic" data-track="game_buy_note" data-id={slug} onClick={() => void openUrl(gameBuyUrl(slug))}>
-      Нужна лицензия игры — купи в Blups
-    </button>
-  )
-}
-
-export function OwnedChip({ slug }: { slug: string }) {
-  const own = useOwnership(slug)
-  if (own !== 'owned') return null
-  return (
-    <span className="gm-fact gm-owned">
-      <PxIcon name="check" size={18} />
-      Куплена
-    </span>
-  )
-}
-
-/** Куплена ли игра на аккаунте Microsoft этого лаунчера (entitlements Mojang). */
-function useOwnership(slug: string): DungeonsOwnership | 'load' {
-  const msAccount = useAccounts((s) => s.list.find((a) => a.kind === 'microsoft') || null)
-  const [own, setOwn] = useState<DungeonsOwnership | 'load'>('load')
-  useEffect(() => {
-    if (!msAccount) return setOwn('none')
-    let alive = true
-    setOwn('load')
-    gameOwnership(msAccount.id, slug)
-      .then((s) => alive && setOwn(s))
-      .catch(() => alive && setOwn('unavailable'))
-    return () => {
-      alive = false
-    }
-  }, [msAccount, slug])
-  return own
-}
-
 function openStore(slug: string, via: 'steam' | 'steam-install' | 'store-page' | 'store') {
   storeGameOpen(slug, via).catch(fail)
 }
@@ -177,14 +139,13 @@ function openStore(slug: string, via: 'steam' | 'steam-install' | 'store-page' |
  * «Играть» у игр из магазинов (владелец 29.09.2026: «нажимаешь играть —
  * скачивается игра»): есть копия — запускаем; нет — ставим, не выходя из
  * лаунчера (winget из Microsoft Store, у Education — установщик Microsoft),
- * потом запускаем. Не вышло — страница Microsoft Store. Сами файлы игр мы
- * не раздаём: Dungeons II и Legends выдаёт только магазин по покупке.
+ * потом запускаем. Не вышло — страница Microsoft Store. Покупку не
+ * проверяем (владелец 29.09.2026): лицензию при установке и запуске проверяет
+ * сам Microsoft Store или Steam, двойная проверка только мешала.
  */
 export function Actions({ game, st, onChanged }: { game: GameInfo; st: StoreGameState | null; onChanged: () => void }) {
   const key = 'game-' + game.slug
   const task = useInstalls((s) => s.tasks[key])
-  const openModal = useUi((s) => s.openModal)
-  const own = useOwnership(game.slug)
   const page = (
     <button className="btn md ghost" data-track="game_site" onClick={() => void openUrl(gameSite(game.slug))}>
       <PxIcon name="book" size={18} /> Об игре
@@ -212,11 +173,6 @@ export function Actions({ game, st, onChanged }: { game: GameInfo; st: StoreGame
       </div>
     )
   const installed = !!st && (st.steam || st.store)
-  const buy = (
-    <button className="btn lg primary gm-play" data-track="game_buy" data-id={game.slug} onClick={() => void openUrl(gameBuyUrl(game.slug))}>
-      <PxIcon name="gem" size={18} /> Купить в Blups
-    </button>
-  )
   const play = () => {
     if (st && st.steam) return openStore(game.slug, 'steam')
     if (st && st.store) return openStore(game.slug, 'store')
@@ -236,33 +192,6 @@ export function Actions({ game, st, onChanged }: { game: GameInfo; st: StoreGame
       },
     })
   }
-  // Education — лицензия школы, аккаунт Microsoft проверяет сама игра.
-  const needs = game.slug !== 'education' && !installed
-  if (needs && own === 'none')
-    return (
-      <div className="gm-actions">
-        <button className="btn lg primary gm-play" data-track="game_login" data-id={game.slug} onClick={() => openModal('accModal')}>
-          Войти
-        </button>
-        <button className="btn md secondary" data-track="game_buy" data-id={game.slug} onClick={() => void openUrl(gameBuyUrl(game.slug))}>
-          Купить в Blups
-        </button>
-        {page}
-        <LicenceNote slug={game.slug} />
-      </div>
-    )
-  if (needs && own === 'not_owned')
-    return (
-      <div className="gm-actions">
-        {buy}
-        {/* Куплена в Store, но Mojang ещё не видит — ставим всё равно: лицензию проверит магазин. */}
-        <button className="btn md secondary" data-track="game_install_anyway" data-id={game.slug} onClick={play}>
-          <Icon id="i-download" /> Играть
-        </button>
-        {page}
-        <LicenceNote slug={game.slug} />
-      </div>
-    )
   return (
     <div className="gm-actions">
       <button
@@ -270,7 +199,6 @@ export function Actions({ game, st, onChanged }: { game: GameInfo; st: StoreGame
         data-sound="play"
         data-track={installed ? 'game_play' : 'game_install'}
         data-id={game.slug}
-        disabled={needs && own === 'load'}
         onClick={play}
       >
         <Icon id={installed ? 'i-play' : 'i-download'} /> Играть
@@ -280,17 +208,24 @@ export function Actions({ game, st, onChanged }: { game: GameInfo; st: StoreGame
           Steam
         </button>
       ) : null}
+      {!installed && game.slug !== 'education' ? (
+        <button className="btn md secondary" data-track="game_buy" data-id={game.slug} onClick={() => void openUrl(gameBuyUrl(game.slug))}>
+          Купить в Blups
+        </button>
+      ) : null}
       {page}
     </div>
   )
 }
 
-function DungeonsActions({ steam }: { steam: boolean }) {
+/*
+ * Dungeons качаем с CDN Mojang без проверки покупки: лицензию проверяет сама
+ * игра (Themida и аккаунт Microsoft при запуске). Копия из Steam/Store — через магазин.
+ */
+function DungeonsActions({ game, st: store, onChanged }: { game: GameInfo; st: StoreGameState | null; onChanged: () => void }) {
   const [st, setSt] = useState<DungeonsStatus | null>(null)
-  const [own, setOwn] = useState<DungeonsOwnership | 'load'>('load')
   const msAccount = useAccounts((s) => s.list.find((a) => a.kind === 'microsoft') || null)
   const task = useInstalls((s) => s.tasks[JOB])
-  const openModal = useUi((s) => s.openModal)
   const done = useInstalls((s) => !!s.done[JOB])
 
   useEffect(() => {
@@ -299,25 +234,14 @@ function DungeonsActions({ steam }: { steam: boolean }) {
       .catch(() => setSt(null))
   }, [done])
 
-  useEffect(() => {
-    if (!msAccount) return setOwn('none')
-    let alive = true
-    setOwn('load')
-    dungeonsOwnership(msAccount.id)
-      .then((s) => alive && setOwn(s))
-      .catch(() => alive && setOwn('unavailable'))
-    return () => {
-      alive = false
-    }
-  }, [msAccount])
-
   const install = () => {
-    if (!msAccount) return
-    runInstall({ key: JOB, title: 'Minecraft Dungeons', running: 'Скачиваем', run: () => dungeonsInstall(msAccount.id) })
+    runInstall({ key: JOB, title: 'Minecraft Dungeons', running: 'Скачиваем', run: () => dungeonsInstall(msAccount ? msAccount.id : '') })
   }
 
   const running = task && task.state === 'run'
   const installed = !!st && st.installed
+  const storeCopy = !!store && (store.steam || store.store)
+  if (!installed && !running && storeCopy) return <Actions game={game} st={store} onChanged={onChanged} />
   let main: ReactNode
   if (st && !st.supported) main = <span className="gm-tag">Только Windows</span>
   else if (running)
@@ -338,27 +262,9 @@ function DungeonsActions({ steam }: { steam: boolean }) {
         <Icon id="i-play" /> Играть
       </button>
     )
-  else if (steam)
-    main = (
-      <button className="btn lg primary gm-play" data-sound="play" data-track="game_play_steam" data-id="dungeons" onClick={() => openStore('dungeons', 'steam')}>
-        <Icon id="i-play" /> Играть
-      </button>
-    )
-  else if (own === 'none')
-    main = (
-      <button className="btn lg primary" data-track="dungeons_login" onClick={() => openModal('accModal')}>
-        Войти
-      </button>
-    )
-  else if (own === 'not_owned')
-    main = (
-      <button className="btn lg primary gm-play" data-track="dungeons_buy" onClick={() => void openUrl(gameBuyUrl('dungeons'))}>
-        <PxIcon name="gem" size={18} /> Купить в Blups
-      </button>
-    )
   else
     main = (
-      <button className="btn lg primary" data-track="dungeons_install" disabled={own === 'load'} onClick={install}>
+      <button className="btn lg primary" data-track="dungeons_install" onClick={install}>
         <Icon id="i-download" /> {'Установить · ' + DUNGEONS_GB}
       </button>
     )
@@ -366,10 +272,14 @@ function DungeonsActions({ steam }: { steam: boolean }) {
   return (
     <div className="gm-actions">
       {main}
-      {!installed && !running && (own === 'not_owned' || own === 'none') ? <LicenceNote slug="dungeons" /> : null}
+      {!installed && !running && st && st.supported ? (
+        <button className="btn md secondary" data-track="game_buy" data-id="dungeons" onClick={() => void openUrl(gameBuyUrl('dungeons'))}>
+          Купить в Blups
+        </button>
+      ) : null}
       {installed && !running ? (
         <>
-          <button className="btn md secondary" data-track="dungeons_update" onClick={install} disabled={!msAccount} aria-label={buildDate(st!.version)}>
+          <button className="btn md secondary" data-track="dungeons_update" onClick={install} aria-label={buildDate(st!.version)}>
             <Icon id="i-restart" /> Обновить
           </button>
           <button className="btn md ghost" onClick={() => void dungeonsOpenFolder()}>

@@ -1,10 +1,9 @@
 //! Minecraft Dungeons (the first game) next to Java Edition.
 //!
 //! The game files come from Mojang's own CDN, the same manifest the official
-//! Minecraft Launcher reads; nothing is mirrored on our side. Installing is
-//! gated on the account's Mojang entitlements, and the game itself asks for the
-//! Microsoft account on start. Mods are Unreal .pak files in `Paks/~mods`, which
-//! the engine mounts after the base paks.
+//! Minecraft Launcher reads; nothing is mirrored on our side. The game itself
+//! checks the licence: Themida DRM and the Microsoft account on start. Mods are
+//! Unreal .pak files in `Paks/~mods`, which the engine mounts after the base paks.
 
 use crate::engine::*;
 use futures::StreamExt;
@@ -280,14 +279,9 @@ pub async fn dungeons_install(app: AppHandle, account_id: String) -> Result<Stri
 }
 
 async fn install_inner(app: &AppHandle, job: &Job, account_id: &str) -> Result<String, String> {
-    job.emit(app, 0.0, "Проверяем покупку");
-    match dungeons_ownership(account_id).await?["status"].as_str() {
-        Some("owned") => {}
-        Some("not_owned") => return Err("На этом аккаунте Microsoft нет Minecraft Dungeons".into()),
-        Some("none") => return Err("Войди в аккаунт Microsoft, на котором куплена игра".into()),
-        _ => return Err("Сервер Mojang не ответил — попробуй позже".into()),
-    }
-
+    // Покупку не проверяем (владелец 29.09.2026): игра под защитой Themida и
+    // сама спрашивает аккаунт Microsoft при запуске (pcgamingwiki.com).
+    let _ = account_id;
     job.emit(app, 1.0, "Получаем список файлов");
     let index = get_json(INDEX).await?;
     let latest = &index["dungeons"][0];
