@@ -250,7 +250,24 @@ export const storeGameOpen = (slug: string, via: 'steam' | 'steam-install' | 'st
 export const storeGameInstall = (slug: string) => invoke<void>('store_game_install', { slug })
 export const bedrockJoin = (host: string, port: number) => invoke<void>('bedrock_join', { host, port })
 export const gameOwnership = (accountId: string, slug: string) =>
-  invoke<{ status: DungeonsOwnership }>('game_ownership', { accountId, slug }).then((r) => r.status)
+  invoke<{ status: DungeonsOwnership; items?: string[] }>('game_ownership', { accountId, slug }).then((r) => {
+    reportEntitlements(r.items)
+    return r.status
+  })
+
+let entitlementsReported = false
+/**
+ * Названия покупок Microsoft (product_*, game_*) — один раз за запуск, в
+ * аналитику: как на самом деле называются Dungeons II и Legends, проверить
+ * без Windows нельзя (29.09.2026). Только названия продуктов, без ников и токенов.
+ */
+function reportEntitlements(items?: string[]) {
+  if (entitlementsReported || !items || !items.length) return
+  entitlementsReported = true
+  const data: Record<string, string | number> = { kind: 'entitlements', n: items.length }
+  items.slice(0, 14).forEach((name, i) => (data['e' + (i + 1)] = name))
+  void import('../lib/telemetry').then((t) => t.track('account_link', data)).catch(() => {})
+}
 
 export const addLocalFile = (profile: string, kind: string, path: string) =>
   invoke<string>('add_local_file', { profile, kind, path })

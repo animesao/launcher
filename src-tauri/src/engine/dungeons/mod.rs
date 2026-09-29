@@ -98,7 +98,14 @@ pub async fn game_ownership(account_id: &str, slug: &str) -> Result<Value, Strin
     }
     let j: Value = r.json().await.map_err(|e| e.to_string())?;
     let status = if owns_game(&j, slug) { "owned" } else { "not_owned" };
-    Ok(serde_json::json!({ "status": status }))
+    // Product names only (product_dungeons, …): no ids, signatures or tokens.
+    // They go to telemetry so the matcher can be checked against real
+    // purchases of Dungeons II and Legends without a Windows test machine.
+    let items: Vec<&str> = j["items"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|i| i["name"].as_str()).filter(|n| n.len() <= 64).collect())
+        .unwrap_or_default();
+    Ok(serde_json::json!({ "status": status, "items": items }))
 }
 
 pub async fn dungeons_ownership(account_id: &str) -> Result<Value, String> {
