@@ -214,6 +214,48 @@ export const activeInstalls = () => invoke<InstallJob[]>('active_installs', {})
 
 export const cancelInstall = (key: string) => invoke<boolean>('cancel_install', { key })
 
+export interface DungeonsMod {
+  name: string
+  enabled: boolean
+  size: number
+}
+
+export interface DungeonsStatus {
+  supported: boolean
+  installed: boolean
+  version: string
+  dir: string
+  mods: DungeonsMod[]
+}
+
+export type DungeonsOwnership = 'owned' | 'not_owned' | 'none' | 'unavailable'
+
+export const dungeonsStatus = () => invoke<DungeonsStatus>('dungeons_status', {})
+export const dungeonsOwnership = (accountId: string) =>
+  invoke<{ status: DungeonsOwnership }>('dungeons_ownership', { accountId }).then((r) => r.status)
+export const dungeonsInstall = (accountId: string) => invoke<string>('dungeons_install', { accountId })
+export const dungeonsLaunch = () => invoke<void>('dungeons_launch', {})
+export const dungeonsPickMods = () => invoke<number>('dungeons_pick_mods', {})
+export const dungeonsToggleMod = (name: string, enabled: boolean) => invoke<void>('dungeons_toggle_mod', { name, enabled })
+export const dungeonsRemoveMod = (name: string) => invoke<void>('dungeons_remove_mod', { name })
+export const dungeonsOpenFolder = () => invoke<void>('dungeons_open_folder', {})
+
+export interface StoreGameState {
+  slug: string
+  steam: boolean
+  steamClient: boolean
+  store: boolean
+  windows: boolean
+}
+
+export const storeGamesState = () => invoke<StoreGameState[]>('store_games_state', {})
+export const storeGameOpen = (slug: string, via: 'steam' | 'steam-install' | 'store-page' | 'store') =>
+  invoke<void>('store_game_open', { slug, via })
+export const storeGameInstall = (slug: string) => invoke<void>('store_game_install', { slug })
+export const bedrockJoin = (host: string, port: number) => invoke<void>('bedrock_join', { host, port })
+export const gameOwnership = (accountId: string, slug: string) =>
+  invoke<{ status: DungeonsOwnership }>('game_ownership', { accountId, slug }).then((r) => r.status)
+
 export const addLocalFile = (profile: string, kind: string, path: string) =>
   invoke<string>('add_local_file', { profile, kind, path })
 

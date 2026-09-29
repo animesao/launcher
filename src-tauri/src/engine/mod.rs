@@ -47,6 +47,8 @@ pub mod accounts;
 pub mod skins;
 pub mod media;
 pub mod cloud;
+pub mod dungeons;
+pub mod games;
 
 pub use core::*;
 pub use game::*;
@@ -56,3 +58,5 @@ pub use accounts::*;
 pub use skins::*;
 pub use media::*;
 pub use cloud::*;
+pub use dungeons::*;
+pub use games::*;
