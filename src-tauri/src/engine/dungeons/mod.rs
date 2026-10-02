@@ -1,32 +1,55 @@
-//! Minecraft Dungeons (the first game) next to Java Edition.
+//! Minecraft Dungeons and Dungeons II next to Java Edition.
 //!
-//! The game files come from Mojang's own CDN, the same manifest the official
-//! Minecraft Launcher reads; nothing is mirrored on our side. The game itself
-//! checks the licence: Themida DRM and the Microsoft account on start. Mods are
-//! Unreal .pak files in `Paks/~mods`, which the engine mounts after the base paks.
+//! Both games come from our own storage as a Microsoft Store build. That build
+//! does not ask for a licence by itself, so the server does: it checks the
+//! purchase for the player's Minecraft token and only then signs links to the
+//! files (trade-api `launcher/games`). Mods of the first game are Unreal .pak
+//! files in `Paks/~mods`, which the engine mounts after the base paks.
 
 use crate::engine::*;
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
 
-const INDEX: &str =
-    "https://piston-meta.mojang.com/v1/products/dungeons/f4c685912beb55eb2d5c9e0713fe1195164bba27/windows-x64.json";
 const ENTITLEMENTS: &str = "https://api.minecraftservices.com/entitlements/mcstore";
-const JOB_KEY: &str = "dungeons";
-const PARALLEL: usize = 8;
-const EXE: &str = "Dungeons.exe";
+const PARALLEL: usize = 6;
 const MODS_DIR: &str = "Dungeons/Content/Paks/~mods";
-const VERSION_FILE: &str = ".millida-version";
+const INSTALL_FILE: &str = ".millida-install.json";
+const LEGACY_VERSION_FILE: &str = ".millida-version";
+const LEGACY_EXE: &str = "Dungeons.exe";
 const LEDGER_FILE: &str = ".millida-files.json";
 const DISABLED: &str = ".disabled";
+const SIGN_IN: &str = "Войдите в лаунчере аккаунтом Microsoft, на котором куплена игра";
+
+struct MirrorGame {
+    slug: &'static str,
+    title: &'static str,
+}
+
+const GAMES: &[MirrorGame] = &[
+    MirrorGame { slug: "dungeons", title: "Minecraft Dungeons" },
+    MirrorGame { slug: "dungeons-2", title: "Minecraft Dungeons II" },
+];
+
+fn mirror_game(slug: &str) -> Result<&'static MirrorGame, String> {
+    GAMES.iter().find(|g| g.slug == slug).ok_or_else(|| "Такой игры нет".to_string())
+}
+
+fn game_dir(g: &MirrorGame) -> PathBuf {
+    game_root().join(g.slug)
+}
 
 pub fn dungeons_dir() -> PathBuf {
     game_root().join("dungeons")
+}
+
+pub fn mirror_game_dir(slug: &str) -> Result<PathBuf, String> {
+    mirror_game(slug).map(game_dir)
 }
 
 fn mods_dir() -> PathBuf {
@@ -42,7 +65,7 @@ pub struct DungeonsMod {
 
 #[derive(Serialize)]
 pub struct DungeonsStatus {
-    /// The game ships for Windows only; elsewhere the screen shows why.
+    /// The games ship for Windows only; elsewhere the screen shows why.
     pub supported: bool,
     pub installed: bool,
     pub version: String,
@@ -50,16 +73,39 @@ pub struct DungeonsStatus {
     pub mods: Vec<DungeonsMod>,
 }
 
-pub fn dungeons_status() -> DungeonsStatus {
-    let dir = dungeons_dir();
-    let version = std::fs::read_to_string(dir.join(VERSION_FILE)).unwrap_or_default().trim().to_string();
-    DungeonsStatus {
-        supported: cfg!(target_os = "windows"),
-        installed: !version.is_empty() && dir.join(EXE).is_file(),
-        version,
-        dir: dir.to_string_lossy().into_owned(),
-        mods: list_mods(),
+#[derive(Serialize, Deserialize)]
+struct Installed {
+    version: String,
+    exe: String,
+}
+
+/// Installs made from Mojang's CDN before the move to our storage left only a
+/// version file; their exe was always `Dungeons.exe` at the root.
+fn read_installed(dir: &Path) -> Option<Installed> {
+    if let Ok(text) = std::fs::read_to_string(dir.join(INSTALL_FILE)) {
+        return serde_json::from_str(&text).ok();
     }
+    let version = std::fs::read_to_string(dir.join(LEGACY_VERSION_FILE)).ok()?.trim().to_string();
+    (!version.is_empty()).then(|| Installed { version, exe: LEGACY_EXE.into() })
+}
+
+fn installed_exe(dir: &Path) -> Option<(Installed, PathBuf)> {
+    let inst = read_installed(dir)?;
+    let exe = safe_join(dir, &inst.exe).ok().filter(|p| p.is_file())?;
+    Some((inst, exe))
+}
+
+pub fn dungeons_status(slug: &str) -> Result<DungeonsStatus, String> {
+    let g = mirror_game(slug)?;
+    let dir = game_dir(g);
+    let installed = installed_exe(&dir).map(|(i, _)| i);
+    Ok(DungeonsStatus {
+        supported: cfg!(target_os = "windows"),
+        installed: installed.is_some(),
+        version: installed.map(|i| i.version).unwrap_or_default(),
+        dir: dir.to_string_lossy().into_owned(),
+        mods: if g.slug == "dungeons" { list_mods() } else { Vec::new() },
+    })
 }
 
 /// Entitlement names carry the product in them (`product_dungeons`,
@@ -111,75 +157,148 @@ pub async fn dungeons_ownership(account_id: &str) -> Result<Value, String> {
     game_ownership(account_id, "dungeons").await
 }
 
-struct Blob {
-    url: String,
-    sha1: String,
+#[derive(Deserialize)]
+struct RemoteManifest {
+    version: String,
+    exe: String,
+    files: Vec<RemoteFile>,
+}
+
+#[derive(Deserialize)]
+struct RemoteFile {
+    path: String,
     size: u64,
+    sha256: String,
+    url: String,
+    download: RemoteBlob,
+}
+
+#[derive(Deserialize)]
+struct RemoteBlob {
+    size: u64,
+    sha256: String,
+    encoding: String,
+}
+
+/// `Ok(Err(message))` is a 401: the Minecraft token has expired and one silent
+/// renewal is worth a try before the player is asked to sign in again.
+async fn request_manifest(slug: &str, token: &str) -> Result<Result<RemoteManifest, String>, String> {
+    let url = format!("{}/launcher/games/{}/manifest", MILLIDA_API, slug);
+    let r = client().post(&url).header("X-Minecraft-Token", token).send().await.map_err(|e| net_err(&e))?;
+    let status = r.status();
+    let text = r.text().await.map_err(|e| net_err(&e))?;
+    if status.is_success() {
+        return serde_json::from_str(&text)
+            .map(Ok)
+            .map_err(|_| "Сервер прислал непонятный список файлов игры. Обновите лаунчер".to_string());
+    }
+    let msg = api_error_message(&text).unwrap_or_else(|| format!("Сервер загрузки игр ответил {}", status.as_u16()));
+    if status.as_u16() == 401 {
+        return Ok(Err(msg));
+    }
+    Err(msg)
+}
+
+async fn fresh_token(account_id: &str) -> Result<String, String> {
+    let r = ms_session_refresh(account_id).await?;
+    match r["status"].as_str() {
+        Some("ok") => mc_token(account_id).ok_or_else(|| SIGN_IN.to_string()),
+        Some("unavailable") => Err("Microsoft не ответил. Проверьте интернет и попробуйте ещё раз".into()),
+        _ => Err("Вход Microsoft устарел. Войдите в аккаунт Microsoft заново".into()),
+    }
+}
+
+async fn fetch_manifest(slug: &str, account_id: &str) -> Result<RemoteManifest, String> {
+    let id = account_id.trim();
+    if id.is_empty() {
+        return Err(SIGN_IN.into());
+    }
+    if let Some(token) = mc_token(id) {
+        if let Ok(m) = request_manifest(slug, &token).await? {
+            return Ok(m);
+        }
+    }
+    let token = fresh_token(id).await?;
+    request_manifest(slug, &token).await?
 }
 
 struct FileJob {
     rel: String,
     path: PathBuf,
-    raw: Blob,
-    /// Mojang keeps an LZMA copy of most files: 2,33 GB instead of 5,82 GB for
-    /// the whole game (manifest 12688467, 29.09.2026). Unpacked on our side.
-    lzma: Option<Blob>,
+    size: u64,
+    sha256: String,
+    url: String,
+    wire: u64,
+    wire_sha256: String,
+    gzip: bool,
 }
 
-impl FileJob {
-    /// Bytes that actually cross the network for this file.
-    fn wire(&self) -> u64 {
-        self.lzma.as_ref().map(|b| b.size).unwrap_or(self.raw.size)
+fn is_sha256(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn in_mods(rel: &str) -> bool {
+    rel.replace('\\', "/").split('/').any(|s| s.eq_ignore_ascii_case("~mods"))
+}
+
+/// Paths come from our server, but they still go through safe_join like any
+/// remote path, and the player's mods folder is never ours to write.
+fn plan(m: &RemoteManifest, root: &Path) -> Result<Vec<FileJob>, String> {
+    if m.files.is_empty() {
+        return Err("Сервер прислал пустой список файлов игры".into());
     }
-}
-
-fn blob(v: &Value) -> Option<Blob> {
-    Some(Blob {
-        url: v["url"].as_str()?.to_string(),
-        sha1: v["sha1"].as_str().unwrap_or_default().to_string(),
-        size: v["size"].as_u64().unwrap_or(0),
-    })
-}
-
-/// Directories are created up front; files are returned for download. Paths
-/// come from Mojang, but they still go through safe_join like any remote path.
-fn plan(manifest: &Value, root: &Path) -> Result<Vec<FileJob>, String> {
-    let files = manifest["files"].as_object().ok_or("в манифесте Dungeons нет списка файлов")?;
-    let mut jobs = Vec::new();
-    for (rel, f) in files {
-        // Mojang's manifest lists the install root itself as a directory with
-        // an empty path; the root already exists.
-        if f["type"].as_str() == Some("directory") && rel.trim().is_empty() {
-            continue;
-        }
-        let path = safe_join(root, rel)?;
-        if f["type"].as_str() == Some("directory") {
-            std::fs::create_dir_all(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-            continue;
-        }
-        let raw = blob(&f["downloads"]["raw"]).ok_or_else(|| format!("{}: нет ссылки", rel))?;
-        let lzma = blob(&f["downloads"]["lzma"]).filter(|b| !b.sha1.is_empty() && b.size < raw.size);
-        jobs.push(FileJob { rel: rel.clone(), path, raw, lzma });
+    if !m.files.iter().any(|f| f.path.eq_ignore_ascii_case(&m.exe)) {
+        return Err("В списке файлов игры нет файла запуска".into());
     }
-    // Largest first: the two 1,2 GB paks set the finish time, so they must not
-    // start last behind two hundred small files.
-    jobs.sort_by_key(|j| std::cmp::Reverse(j.wire()));
+    let mut jobs = Vec::with_capacity(m.files.len());
+    for f in &m.files {
+        if in_mods(&f.path) {
+            return Err(format!("{}: файл в папке модов", f.path));
+        }
+        let path = safe_join(root, &f.path)?;
+        let gzip = match f.download.encoding.as_str() {
+            "gzip" => true,
+            "identity" => false,
+            other => return Err(format!("{}: неизвестное сжатие {}", f.path, other)),
+        };
+        if !is_sha256(&f.sha256) || !is_sha256(&f.download.sha256) {
+            return Err(format!("{}: нет контрольной суммы", f.path));
+        }
+        jobs.push(FileJob {
+            rel: f.path.clone(),
+            path,
+            size: f.size,
+            sha256: f.sha256.to_ascii_lowercase(),
+            url: f.url.clone(),
+            wire: f.download.size,
+            wire_sha256: f.download.sha256.to_ascii_lowercase(),
+            gzip,
+        });
+    }
+    // Largest first: the biggest paks set the finish time, so they must not
+    // start last behind hundreds of small files.
+    jobs.sort_by_key(|j| std::cmp::Reverse(j.wire));
     Ok(jobs)
 }
 
-/// What the last install put in place: path → sha1. An update then skips a
-/// matching file by its size alone instead of rehashing six gigabytes.
-fn read_ledger(root: &Path) -> std::collections::HashMap<String, String> {
+/// What the last install put in place: path → hash. An update then skips a
+/// matching file by its size alone instead of rehashing gigabytes. Installs
+/// from Mojang's CDN recorded sha1 here; those never match and get hashed once.
+fn read_ledger(root: &Path) -> HashMap<String, String> {
     std::fs::read_to_string(root.join(LEDGER_FILE))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
 }
 
-fn sha1_file(path: &Path) -> Option<String> {
-    use sha1::Digest as _;
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+fn sha256_file(path: &Path) -> Option<String> {
+    use sha2::Digest as _;
     let mut f = std::fs::File::open(path).ok()?;
-    let mut h = sha1::Sha1::new();
+    let mut h = sha2::Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = std::io::Read::read(&mut f, &mut buf).ok()?;
@@ -191,32 +310,26 @@ fn sha1_file(path: &Path) -> Option<String> {
     Some(hex(&h.finalize()))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Already in place: same size and either recorded by the ledger or hashing
-/// to the manifest sha1 (an install made before the ledger existed).
-fn in_place(j: &FileJob, ledger: &std::collections::HashMap<String, String>) -> bool {
+fn in_place(j: &FileJob, ledger: &HashMap<String, String>) -> bool {
     let Ok(meta) = std::fs::metadata(&j.path) else { return false };
-    if meta.len() != j.raw.size {
+    if meta.len() != j.size {
         return false;
     }
-    if ledger.get(&j.rel).is_some_and(|s| s.eq_ignore_ascii_case(&j.raw.sha1)) {
+    if ledger.get(&j.rel).is_some_and(|s| s.eq_ignore_ascii_case(&j.sha256)) {
         return true;
     }
-    sha1_file(&j.path).is_some_and(|s| s.eq_ignore_ascii_case(&j.raw.sha1))
+    sha256_file(&j.path).is_some_and(|s| s.eq_ignore_ascii_case(&j.sha256))
 }
 
 struct HashingWriter<W: std::io::Write> {
     inner: W,
-    h: sha1::Sha1,
+    h: sha2::Sha256,
     n: u64,
 }
 
 impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        use sha1::Digest as _;
+        use sha2::Digest as _;
         let n = self.inner.write(buf)?;
         self.h.update(&buf[..n]);
         self.n += n as u64;
@@ -227,23 +340,22 @@ impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
     }
 }
 
-/// Unpacks a downloaded .lzma next to its destination, checks the result
-/// against the manifest's raw sha1 and size, and only then puts it in place.
-fn unpack_lzma(src: &Path, dest: &Path, raw: &Blob) -> Result<(), String> {
-    use sha1::Digest as _;
+/// Unpacks a downloaded .gz next to its destination, checks the result against
+/// the manifest's size and sha256, and only then puts it in place.
+fn unpack_gzip(src: &Path, dest: &Path, size: u64, sha256: &str) -> Result<(), String> {
+    use sha2::Digest as _;
     let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = dest.with_file_name(format!("{}.millida-unpack", name));
     let res = (|| {
         let input = std::fs::File::open(src).map_err(|e| format!("{}: {}", src.display(), e))?;
-        let mut input = std::io::BufReader::with_capacity(1 << 20, input);
+        let mut input = flate2::read::GzDecoder::new(std::io::BufReader::with_capacity(1 << 20, input));
         let out = std::fs::File::create(&tmp).map_err(|e| format!("{}: {}", tmp.display(), e))?;
-        let mut w = HashingWriter { inner: std::io::BufWriter::with_capacity(1 << 20, out), h: sha1::Sha1::new(), n: 0 };
-        lzma_rs::lzma_decompress(&mut input, &mut w).map_err(|e| format!("{}: не распаковался ({})", name, e))?;
+        let mut w = HashingWriter { inner: std::io::BufWriter::with_capacity(1 << 20, out), h: sha2::Sha256::new(), n: 0 };
+        std::io::copy(&mut input, &mut w).map_err(|e| format!("{}: не распаковался ({})", name, e))?;
         std::io::Write::flush(&mut w).map_err(|e| e.to_string())?;
         let HashingWriter { inner, h, n } = w;
         drop(inner);
-        let got = hex(&h.finalize());
-        if n != raw.size || !got.eq_ignore_ascii_case(&raw.sha1) {
+        if n != size || !hex(&h.finalize()).eq_ignore_ascii_case(sha256) {
             return Err(format!("{}: контрольная сумма не сошлась после распаковки", name));
         }
         std::fs::rename(&tmp, dest).map_err(|e| format!("{}: {}", dest.display(), e))
@@ -256,64 +368,87 @@ fn unpack_lzma(src: &Path, dest: &Path, raw: &Blob) -> Result<(), String> {
 }
 
 async fn fetch_one(j: &FileJob, cancel: &std::sync::atomic::AtomicBool) -> Result<(), String> {
-    let Some(z) = &j.lzma else {
-        let sum = (!j.raw.sha1.is_empty()).then_some(Sum::Sha1(j.raw.sha1.as_str()));
-        return download_checked_cancellable(&j.raw.url, &j.path, sum, Some(j.raw.size), Some(cancel)).await;
-    };
+    if let Some(parent) = j.path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {}", parent.display(), e))?;
+    }
+    if !j.gzip {
+        return download_checked_cancellable(&j.url, &j.path, Some(Sum::Sha256(&j.sha256)), Some(j.size), Some(cancel)).await;
+    }
     let name = j.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let packed = j.path.with_file_name(format!("{}.millida-lzma", name));
-    download_checked_cancellable(&z.url, &packed, Some(Sum::Sha1(z.sha1.as_str())), Some(z.size), Some(cancel)).await?;
-    let (dest, raw) = (j.path.clone(), Blob { url: String::new(), sha1: j.raw.sha1.clone(), size: j.raw.size });
-    tokio::task::spawn_blocking(move || unpack_lzma(&packed, &dest, &raw))
+    let packed = j.path.with_file_name(format!("{}.millida-gz", name));
+    download_checked_cancellable(&j.url, &packed, Some(Sum::Sha256(&j.wire_sha256)), Some(j.wire), Some(cancel)).await?;
+    let (dest, size, sha) = (j.path.clone(), j.size, j.sha256.clone());
+    tokio::task::spawn_blocking(move || unpack_gzip(&packed, &dest, size, &sha))
         .await
         .map_err(|e| format!("распаковка прервалась: {}", e))?
 }
 
+/// Files of the previous build that the new one no longer has. An old pak left
+/// behind would still be mounted by the engine, so a file that cannot be
+/// removed fails the update instead of being skipped.
+fn remove_stale<'a>(root: &Path, previous: impl Iterator<Item = &'a String>, keep: &HashSet<String>) -> Result<(), String> {
+    for rel in previous {
+        if keep.contains(&rel.to_ascii_lowercase()) || in_mods(rel) {
+            continue;
+        }
+        let Ok(p) = safe_join(root, rel) else { continue };
+        if p.is_file() {
+            std::fs::remove_file(&p).map_err(|e| format!("{}: {}. Закройте игру и обновите ещё раз", p.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
 /// Installs or updates the game in place. Files already in place are kept, so
-/// an update downloads only what changed, and `~mods` is never touched: it is
-/// not in Mojang's manifest.
-pub async fn dungeons_install(app: AppHandle, account_id: String) -> Result<String, String> {
-    let job = Job::start(JOB_KEY, "Minecraft Dungeons")?;
-    let res = install_inner(&app, &job, &account_id).await;
+/// an update downloads only what changed, and `~mods` is never touched.
+pub async fn dungeons_install(app: AppHandle, slug: String, account_id: String) -> Result<String, String> {
+    let g = mirror_game(&slug)?;
+    if !cfg!(target_os = "windows") {
+        return Err(format!("{} запускается только на Windows", g.title));
+    }
+    let job = Job::start(g.slug, g.title)?;
+    let res = install_inner(&app, &job, g, &account_id).await;
     job.finish(&app, res)
 }
 
-async fn install_inner(app: &AppHandle, job: &Job, account_id: &str) -> Result<String, String> {
-    // Покупку не проверяем (владелец 29.09.2026): игра под защитой Themida и
-    // сама спрашивает аккаунт Microsoft при запуске (pcgamingwiki.com).
-    let _ = account_id;
-    job.emit(app, 1.0, "Получаем список файлов");
-    let index = get_json(INDEX).await?;
-    let latest = &index["dungeons"][0];
-    let version = latest["version"]["name"].as_str().unwrap_or("unknown").to_string();
-    let manifest_url = latest["manifest"]["url"].as_str().ok_or("Mojang не отдал манифест Dungeons")?;
-    let manifest = get_json(manifest_url).await?;
+async fn install_inner(app: &AppHandle, job: &Job, g: &MirrorGame, account_id: &str) -> Result<String, String> {
+    job.emit(app, 1.0, "Проверяем покупку");
+    let manifest = fetch_manifest(g.slug, account_id).await?;
+    job.check()?;
 
-    let root = dungeons_dir();
+    let root = game_dir(g);
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {}", root.display(), e))?;
     let all = plan(&manifest, &root)?;
 
     job.emit(app, 2.0, "Проверяем файлы");
     let ledger = read_ledger(&root);
+    let previous: Vec<String> = ledger.keys().cloned().collect();
     let (all, todo): (Vec<FileJob>, Vec<bool>) = tokio::task::spawn_blocking(move || {
         let todo = all.iter().map(|j| !in_place(j, &ledger)).collect::<Vec<_>>();
         (all, todo)
     })
     .await
     .map_err(|e| e.to_string())?;
-    let mut record: std::collections::HashMap<String, String> =
-        all.iter().map(|j| (j.rel.clone(), j.raw.sha1.clone())).collect();
+    let keep: HashSet<String> = all.iter().map(|j| j.rel.to_ascii_lowercase()).collect();
+    let mut record: HashMap<String, String> = all.iter().map(|j| (j.rel.clone(), j.sha256.clone())).collect();
     let jobs: Vec<FileJob> = all.into_iter().zip(todo).filter(|(_, t)| *t).map(|(j, _)| j).collect();
 
-    let total: u64 = jobs.iter().map(|j| j.wire()).sum::<u64>().max(1);
+    if !jobs.is_empty() {
+        // The build on disk stops being whole from the first replaced file on,
+        // so it must not look installed until the update completes.
+        let _ = std::fs::remove_file(root.join(INSTALL_FILE));
+        let _ = std::fs::remove_file(root.join(LEGACY_VERSION_FILE));
+    }
+
+    let total: u64 = jobs.iter().map(|j| j.wire).sum::<u64>().max(1);
     let done = Arc::new(AtomicU64::new(0));
     let gb = |b: u64| b as f64 / 1_073_741_824.0;
     let results: Vec<(String, Result<(), String>)> = futures::stream::iter(jobs.into_iter().map(|j| {
         let done = done.clone();
         async move {
             let r = fetch_one(&j, job.cancel_flag()).await;
-            let d = done.fetch_add(j.wire(), Ordering::Relaxed) + j.wire();
-            job.emit(app, 3.0 + 96.0 * (d as f32 / total as f32), &format!("{:.2} / {:.2} ГБ", gb(d), gb(total)));
+            let d = done.fetch_add(j.wire, Ordering::Relaxed) + j.wire;
+            job.emit(app, 3.0 + 95.0 * (d as f32 / total as f32), &format!("{:.2} / {:.2} ГБ", gb(d), gb(total)));
             (j.rel.clone(), r)
         }
     }))
@@ -333,23 +468,29 @@ async fn install_inner(app: &AppHandle, job: &Job, account_id: &str) -> Result<S
         return Err(e);
     }
 
-    std::fs::create_dir_all(mods_dir()).map_err(|e| e.to_string())?;
-    std::fs::write(root.join(VERSION_FILE), &version).map_err(|e| e.to_string())?;
+    job.emit(app, 99.0, "Убираем старые файлы");
+    remove_stale(&root, previous.iter(), &keep)?;
+    if g.slug == "dungeons" {
+        std::fs::create_dir_all(mods_dir()).map_err(|e| e.to_string())?;
+    }
+    let installed = Installed { version: manifest.version.clone(), exe: manifest.exe.clone() };
+    let text = serde_json::to_string(&installed).map_err(|e| e.to_string())?;
+    std::fs::write(root.join(INSTALL_FILE), text).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_file(root.join(LEGACY_VERSION_FILE));
     job.emit(app, 100.0, "Готово");
-    Ok(version)
+    Ok(manifest.version)
 }
 
-pub fn dungeons_launch() -> Result<(), String> {
+pub fn dungeons_launch(slug: &str) -> Result<(), String> {
+    let g = mirror_game(slug)?;
     if !cfg!(target_os = "windows") {
-        return Err("Minecraft Dungeons запускается только на Windows".into());
+        return Err(format!("{} запускается только на Windows", g.title));
     }
-    let dir = dungeons_dir();
-    let exe = dir.join(EXE);
-    if !exe.is_file() {
+    let Some((_, exe)) = installed_exe(&game_dir(g)) else {
         return Err("Игра не установлена".into());
-    }
+    };
     let mut cmd = std::process::Command::new(&exe);
-    cmd.current_dir(&dir);
+    cmd.current_dir(exe.parent().unwrap_or(&game_dir(g)));
     quiet(&mut cmd).spawn().map_err(|e| format!("Не удалось запустить игру: {}", e))?;
     Ok(())
 }
@@ -446,127 +587,102 @@ mod tests {
         assert!(!owns_game(&legends, "bedrock"));
     }
 
-    #[test]
-    fn plan_rejects_escaping_paths() {
-        let root = std::env::temp_dir().join("millida-dungeons-plan-test");
-        let m = serde_json::json!({"files":{"../evil.exe":{"type":"file","downloads":{"raw":{"url":"x","sha1":"","size":1}}}}});
-        assert!(plan(&m, &root).is_err());
+    fn file(path: &str, size: u64, wire: u64, encoding: &str) -> RemoteFile {
+        RemoteFile {
+            path: path.into(),
+            size,
+            sha256: "a".repeat(64),
+            url: "https://garage.example/x".into(),
+            download: RemoteBlob { size: wire, sha256: "b".repeat(64), encoding: encoding.into() },
+        }
+    }
+
+    fn manifest(files: Vec<RemoteFile>) -> RemoteManifest {
+        RemoteManifest { version: "1.0.0.0".into(), exe: "Dungeons.exe".into(), files }
     }
 
     #[test]
-    fn plan_splits_dirs_and_files() {
-        let root = std::env::temp_dir().join("millida-dungeons-plan-ok");
-        let m = serde_json::json!({"files":{
-            "":{"type":"directory"},
-            "Dungeons/Content/Paks/":{"type":"directory"},
-            "Dungeons.exe":{"type":"file","downloads":{"raw":{"url":"https://a/b","sha1":"ab","size":5}}}
-        }});
+    fn plan_refuses_what_must_never_be_written() {
+        let root = std::env::temp_dir().join("millida-mirror-plan-refuse");
+        let table: [(Vec<RemoteFile>, &str); 5] = [
+            (vec![file("Dungeons.exe", 1, 1, "identity"), file("../evil.exe", 1, 1, "identity")], "a path out of the game folder"),
+            (vec![file("Dungeons.exe", 1, 1, "identity"), file("Dungeons/Content/Paks/~mods/x.pak", 1, 1, "identity")], "the player's mods folder"),
+            (vec![file("Dungeons.exe", 1, 1, "zstd")], "an encoding the launcher cannot unpack"),
+            (vec![file("Other.exe", 1, 1, "identity")], "a manifest whose exe is not among its files"),
+            (vec![], "an empty manifest"),
+        ];
+        for (files, why) in table {
+            assert!(plan(&manifest(files), &root).is_err(), "plan must refuse {}", why);
+        }
+    }
+
+    #[test]
+    fn plan_starts_with_the_largest_download() {
+        let root = std::env::temp_dir().join("millida-mirror-plan-order");
+        let m = manifest(vec![file("Dungeons.exe", 10, 10, "identity"), file("big.pak", 1000, 400, "gzip")]);
         let jobs = plan(&m, &root).unwrap();
-        assert_eq!(jobs.len(), 1);
-        assert!(root.join("Dungeons/Content/Paks").is_dir());
-        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(jobs[0].rel, "big.pak", "the biggest file sets the finish time and goes first");
+        assert!(jobs[0].gzip && !jobs[1].gzip);
     }
 
     #[test]
-    fn lzma_copy_is_unpacked_and_verified() {
-        use sha1::Digest as _;
-        let dir = std::env::temp_dir().join("millida-dungeons-lzma-test");
+    fn gzip_copy_is_unpacked_and_verified() {
+        use sha2::Digest as _;
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join("millida-mirror-gzip-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
-        let mut packed = Vec::new();
-        lzma_rs::lzma_compress(&mut std::io::Cursor::new(&data), &mut packed).unwrap();
-        let src = dir.join("a.bin.millida-lzma");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&data).unwrap();
+        let packed = enc.finish().unwrap();
+        let sha = hex(&sha2::Sha256::digest(&data));
+
+        let src = dir.join("a.bin.millida-gz");
         std::fs::write(&src, &packed).unwrap();
         let dest = dir.join("a.bin");
-        let good = Blob { url: String::new(), sha1: hex(&sha1::Sha1::digest(&data)), size: data.len() as u64 };
-        unpack_lzma(&src, &dest, &good).unwrap();
+        unpack_gzip(&src, &dest, data.len() as u64, &sha).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), data);
         assert!(!src.exists(), "the packed copy is removed after unpacking");
 
         std::fs::write(&src, &packed).unwrap();
-        let bad = Blob { url: String::new(), sha1: "00".repeat(20), size: data.len() as u64 };
         let dest2 = dir.join("b.bin");
-        assert!(unpack_lzma(&src, &dest2, &bad).is_err());
+        assert!(unpack_gzip(&src, &dest2, data.len() as u64, &"0".repeat(64)).is_err());
         assert!(!dest2.exists(), "a file that fails the checksum never lands in place");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Real Mojang file: MILLIDA_LZMA_SAMPLE=path/to/Dungeons.exe.lzma
-    /// (piston-data object bb4766f2…, unpacks to sha1 30a9d128…, 189952 bytes).
     #[test]
-    #[ignore]
-    fn mojang_lzma_sample_unpacks() {
-        let Ok(sample) = std::env::var("MILLIDA_LZMA_SAMPLE") else { return };
-        let dir = std::env::temp_dir().join("millida-dungeons-lzma-real");
-        std::fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("Dungeons.exe.millida-lzma");
-        std::fs::copy(sample, &src).unwrap();
-        let raw = Blob { url: String::new(), sha1: "30a9d1283e0a1f3f7590f1926d55c8740b21a111".into(), size: 189952 };
-        unpack_lzma(&src, &dir.join("Dungeons.exe"), &raw).unwrap();
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Живая проверка против серверов Mojang: MILLIDA_DUNGEONS_LIVE=1.
-    /// Берёт настоящий манифест, качает самые мелкие файлы — сжатые и обычный —
-    /// и один средний .lzma, распаковывает и сверяет с манифестом.
-    #[test]
-    #[ignore]
-    fn live_mojang_manifest_downloads() {
-        if std::env::var("MILLIDA_DUNGEONS_LIVE").is_err() {
-            return;
+    fn update_removes_old_build_files_but_never_mods() {
+        let root = std::env::temp_dir().join("millida-mirror-stale");
+        let _ = std::fs::remove_dir_all(&root);
+        for rel in ["old.pak", "keep.pak", "Dungeons/Content/Paks/~mods/mine.pak"] {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
         }
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let index = get_json(INDEX).await.unwrap();
-            let url = index["dungeons"][0]["manifest"]["url"].as_str().unwrap().to_string();
-            let manifest = get_json(&url).await.unwrap();
-            let root = std::env::temp_dir().join("millida-dungeons-live");
-            let _ = std::fs::remove_dir_all(&root);
-            let mut jobs = plan(&manifest, &root).unwrap();
-            assert!(jobs.len() > 200, "the manifest lists the whole game");
-            let wire: u64 = jobs.iter().map(|j| j.wire()).sum();
-            let raw: u64 = jobs.iter().map(|j| j.raw.size).sum();
-            println!("wire {} MB of raw {} MB", wire / 1_000_000, raw / 1_000_000);
-            assert!(wire * 2 < raw, "LZMA copies at least halve the download");
-            jobs.sort_by_key(|j| j.wire());
-            let mut pick: Vec<FileJob> = Vec::new();
-            let mut z = 0;
-            let mut plain = 0;
-            for j in jobs.into_iter() {
-                if j.lzma.is_some() && z < 3 {
-                    z += 1;
-                    pick.push(j);
-                } else if j.lzma.is_none() && plain < 1 {
-                    plain += 1;
-                    pick.push(j);
-                } else if j.lzma.as_ref().is_some_and(|b| b.size > 5_000_000 && b.size < 30_000_000) && pick.len() < 5 {
-                    pick.push(j);
-                }
-            }
-            let cancel = std::sync::atomic::AtomicBool::new(false);
-            for j in &pick {
-                fetch_one(j, &cancel).await.unwrap_or_else(|e| panic!("{}: {}", j.rel, e));
-                assert!(in_place(j, &std::collections::HashMap::new()), "{} matches the manifest sha1", j.rel);
-                println!("ok {} ({} → {} bytes)", j.rel, j.wire(), j.raw.size);
-            }
-            let _ = std::fs::remove_dir_all(&root);
-        });
+        let previous = ["old.pak".to_string(), "Keep.pak".to_string(), "Dungeons/Content/Paks/~mods/mine.pak".to_string(), "../outside.txt".to_string()];
+        let keep: HashSet<String> = ["keep.pak".to_string()].into_iter().collect();
+        remove_stale(&root, previous.iter(), &keep).unwrap();
+        assert!(!root.join("old.pak").exists(), "a pak of the old build would still be mounted");
+        assert!(root.join("keep.pak").exists(), "a file of the new build stays, whatever its case");
+        assert!(root.join("Dungeons/Content/Paks/~mods/mine.pak").exists(), "player mods are not ours to remove");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn plan_prefers_lzma_and_sorts_largest_first() {
-        let root = std::env::temp_dir().join("millida-dungeons-plan-lzma");
-        let m = serde_json::json!({"files":{
-            "small.dll":{"type":"file","downloads":{"raw":{"url":"https://a/s","sha1":"aa","size":10}}},
-            "big.pak":{"type":"file","downloads":{
-                "raw":{"url":"https://a/r","sha1":"bb","size":1000},
-                "lzma":{"url":"https://a/z","sha1":"cc","size":400}}}
-        }});
-        let jobs = plan(&m, &root).unwrap();
-        assert_eq!(jobs[0].rel, "big.pak");
-        assert_eq!(jobs[0].wire(), 400);
-        assert_eq!(jobs[1].wire(), 10);
+    fn a_mojang_install_still_counts_as_installed() {
+        let root = std::env::temp_dir().join("millida-mirror-legacy");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(LEGACY_VERSION_FILE), "12688467_cert_bugfixpatch1\n").unwrap();
+        assert!(installed_exe(&root).is_none(), "no exe on disk means nothing to launch");
+        std::fs::write(root.join(LEGACY_EXE), b"MZ").unwrap();
+        let (inst, exe) = installed_exe(&root).unwrap();
+        assert_eq!(inst.version, "12688467_cert_bugfixpatch1");
+        assert_eq!(exe, root.join(LEGACY_EXE));
+        std::fs::write(root.join(INSTALL_FILE), r#"{"version":"1.17.0.0","exe":"../evil.exe"}"#).unwrap();
+        assert!(installed_exe(&root).is_none(), "an exe outside the game folder is never launched");
         let _ = std::fs::remove_dir_all(&root);
     }
 

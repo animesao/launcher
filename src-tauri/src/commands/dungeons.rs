@@ -1,8 +1,8 @@
 use crate::engine;
 
 #[tauri::command]
-pub async fn dungeons_status() -> Result<engine::DungeonsStatus, String> {
-    super::blocking(engine::dungeons_status).await
+pub async fn dungeons_status(slug: String) -> Result<engine::DungeonsStatus, String> {
+    super::blocking(move || engine::dungeons_status(&slug)).await?
 }
 
 #[tauri::command]
@@ -11,13 +11,13 @@ pub async fn dungeons_ownership(account_id: String) -> Result<serde_json::Value,
 }
 
 #[tauri::command]
-pub async fn dungeons_install(app: tauri::AppHandle, account_id: String) -> Result<String, String> {
-    engine::dungeons_install(app, account_id).await
+pub async fn dungeons_install(app: tauri::AppHandle, slug: String, account_id: String) -> Result<String, String> {
+    engine::dungeons_install(app, slug, account_id).await
 }
 
 #[tauri::command]
-pub async fn dungeons_launch() -> Result<(), String> {
-    super::blocking(engine::dungeons_launch).await?
+pub async fn dungeons_launch(slug: String) -> Result<(), String> {
+    super::blocking(move || engine::dungeons_launch(&slug)).await?
 }
 
 /// The file picker is the only way in: the webview never names a source path.
@@ -39,10 +39,11 @@ pub async fn dungeons_remove_mod(name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn dungeons_open_folder() {
-    let dir = engine::dungeons_dir();
-    let _ = std::fs::create_dir_all(&dir);
+pub fn dungeons_open_folder(slug: String) -> Result<(), String> {
+    let dir = engine::mirror_game_dir(&slug)?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     engine::open_path(&dir.to_string_lossy());
+    Ok(())
 }
 
 #[tauri::command]

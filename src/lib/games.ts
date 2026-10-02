@@ -8,14 +8,14 @@ import { create } from 'zustand'
  * Картинки — официальные постеры и арт из Microsoft Store.
  *
  * Как запускаем:
- * - dungeons — ставим сами с серверов Mojang (engine/dungeons), моды .pak;
- * - dungeons-2, legends — копия игрока в Steam или Microsoft Store (engine/games);
+ * - dungeons, dungeons-2 — ставим сами с нашего хранилища, файлы выдаются после проверки покупки (engine/dungeons); у первой моды .pak;
+ * - legends — копия игрока в Steam или Microsoft Store (engine/games);
  * - education — официальный установщик Microsoft (aka.ms/downloadmee-desktopApp).
  * Обычный Minecraft здесь не стоит: это сам лаунчер (владелец 29.09.2026).
  */
 export type GameSlug = 'dungeons-2' | 'dungeons' | 'legends' | 'education' | 'bedrock'
 
-export type GameRun = 'mojang' | 'store'
+export type GameRun = 'millida' | 'store'
 
 export interface GameInfo {
   slug: GameSlug
@@ -54,7 +54,7 @@ export const GAMES: GameInfo[] = [
     name: 'Minecraft Dungeons II',
     tagline: 'Новое приключение в подземельях',
     released: '29.09.2026',
-    run: 'store',
+    run: 'millida',
     isNew: true,
     meta: 'Вышла 29.09.2026',
     mods: null,
@@ -66,7 +66,7 @@ export const GAMES: GameInfo[] = [
     name: 'Minecraft Dungeons',
     tagline: 'Данжен-кроулер во вселенной Minecraft',
     released: '26.05.2020',
-    run: 'mojang',
+    run: 'millida',
     meta: 'Моды .pak · 2,3 ГБ',
     mods: 'Моды .pak',
     steam: true,

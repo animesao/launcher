@@ -228,15 +228,17 @@ export interface DungeonsStatus {
 
 export type DungeonsOwnership = 'owned' | 'not_owned' | 'none' | 'unavailable'
 
-export const dungeonsStatus = () => invoke<DungeonsStatus>('dungeons_status', {})
+export type MirrorGameSlug = 'dungeons' | 'dungeons-2'
+
+export const dungeonsStatus = (slug: MirrorGameSlug) => invoke<DungeonsStatus>('dungeons_status', { slug })
 export const dungeonsOwnership = (accountId: string) =>
   invoke<{ status: DungeonsOwnership }>('dungeons_ownership', { accountId }).then((r) => r.status)
-export const dungeonsInstall = (accountId: string) => invoke<string>('dungeons_install', { accountId })
-export const dungeonsLaunch = () => invoke<void>('dungeons_launch', {})
+export const dungeonsInstall = (slug: MirrorGameSlug, accountId: string) => invoke<string>('dungeons_install', { slug, accountId })
+export const dungeonsLaunch = (slug: MirrorGameSlug) => invoke<void>('dungeons_launch', { slug })
 export const dungeonsPickMods = () => invoke<number>('dungeons_pick_mods', {})
 export const dungeonsToggleMod = (name: string, enabled: boolean) => invoke<void>('dungeons_toggle_mod', { name, enabled })
 export const dungeonsRemoveMod = (name: string) => invoke<void>('dungeons_remove_mod', { name })
-export const dungeonsOpenFolder = () => invoke<void>('dungeons_open_folder', {})
+export const dungeonsOpenFolder = (slug: MirrorGameSlug) => invoke<void>('dungeons_open_folder', { slug })
 
 export interface StoreGameState {
   slug: string
@@ -1452,3 +1454,4 @@ export const millidaModState = (profile: string) => invoke<MillidaModState>('mil
 export const millidaModInstall = (profile: string) => invoke<MillidaModState>('millida_mod_install', { profile })
 export const millidaModEnabled = () => invoke<boolean>('millida_mod_enabled')
 export const setMillidaModEnabled = (on: boolean) => invoke<void>('set_millida_mod_enabled', { on })
+export const setGameTelemetry = (on: boolean) => invoke<void>('set_game_telemetry', { on })

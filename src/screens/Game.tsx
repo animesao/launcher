@@ -14,8 +14,10 @@ import {
   storeGameOpen,
   storeGamesState,
   type DungeonsStatus,
+  type MirrorGameSlug,
   type StoreGameState,
 } from '../ipc/commands'
+import { api } from '../lib/api'
 import { hasTauri } from '../ipc/tauri'
 import { GAMES, gameBuyUrl, gameHero, gamePoster, gameSite, useGame, type GameInfo } from '../lib/games'
 import { useAccounts } from '../state/accounts'
@@ -31,10 +33,7 @@ import '../styles/pixel/game.css'
  * Как запускается каждая игра — src/lib/games.ts.
  */
 
-const JOB = 'dungeons'
-// Сколько идёт по сети: манифест Mojang 12688467_cert_bugfixpatch1 (замер 29.09.2026)
-// — 5,82 ГБ файлов, из них 144 есть в .lzma; с ними скачивание 2,33 ГБ.
-const DUNGEONS_GB = '2,3 ГБ'
+const MODS_JOB = 'dungeons'
 
 const mb = (b: number) => (b >= 1 << 20 ? (b / (1 << 20)).toFixed(1).replace('.', ',') + ' МБ' : Math.max(1, Math.round(b / 1024)) + ' КБ')
 
@@ -43,6 +42,8 @@ const buildDate = (v: string) => {
   const m = /(\d{4})-(\d{2})-(\d{2})$/.exec(v)
   return m ? 'Обновление ' + m[3] + '.' + m[2] + '.' + m[1] : 'Установлена'
 }
+
+const gbText = (b: number) => (b / 1024 ** 3).toFixed(1).replace('.', ',') + ' ГБ'
 
 const fail = (e: unknown) => showToast(String(e), 'error')
 
@@ -88,7 +89,7 @@ export function Game({ on }: { on: boolean }) {
               </span>
             ) : null}
           </div>
-          {game.run === 'mojang' ? (
+          {game.run === 'millida' ? (
             <DungeonsActions game={game} st={st || null} onChanged={() => setTick((t) => t + 1)} />
           ) : (
             <Actions game={game} st={st || null} onChanged={() => setTick((t) => t + 1)} />
@@ -97,7 +98,7 @@ export function Game({ on }: { on: boolean }) {
         </div>
       </div>
 
-      {game.run === 'mojang' ? <DungeonsMods /> : null}
+      {game.slug === 'dungeons' ? <DungeonsMods /> : null}
       {game.slug === 'bedrock' ? <BedrockServers on={on} /> : null}
 
       <div className="gm-head">
@@ -219,23 +220,37 @@ export function Actions({ game, st, onChanged }: { game: GameInfo; st: StoreGame
 }
 
 /*
- * Dungeons качаем с CDN Mojang без проверки покупки: лицензию проверяет сама
- * игра (Themida и аккаунт Microsoft при запуске). Копия из Steam/Store — через магазин.
+ * Dungeons и Dungeons II качаем с нашего хранилища: сборка из Microsoft Store
+ * сама лицензию не спрашивает, поэтому ссылки на файлы сервер выдаёт только
+ * после проверки покупки на аккаунте Microsoft. Копия из Steam/Store — через магазин.
  */
 function DungeonsActions({ game, st: store, onChanged }: { game: GameInfo; st: StoreGameState | null; onChanged: () => void }) {
+  const slug = game.slug as MirrorGameSlug
   const [st, setSt] = useState<DungeonsStatus | null>(null)
+  const [download, setDownload] = useState<number | null>(null)
   const msAccount = useAccounts((s) => s.list.find((a) => a.kind === 'microsoft') || null)
-  const task = useInstalls((s) => s.tasks[JOB])
-  const done = useInstalls((s) => !!s.done[JOB])
+  const task = useInstalls((s) => s.tasks[slug])
+  const done = useInstalls((s) => !!s.done[slug])
 
   useEffect(() => {
-    dungeonsStatus()
+    dungeonsStatus(slug)
       .then(setSt)
       .catch(() => setSt(null))
-  }, [done])
+  }, [slug, done])
+
+  useEffect(() => {
+    let live = true
+    setDownload(null)
+    api<{ downloadBytes: number }>('/launcher/games/' + slug)
+      .then((r) => live && setDownload(r.downloadBytes))
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [slug])
 
   const install = () => {
-    runInstall({ key: JOB, title: 'Minecraft Dungeons', running: 'Скачиваем', run: () => dungeonsInstall(msAccount ? msAccount.id : '') })
+    runInstall({ key: slug, title: game.name, running: 'Скачиваем', run: () => dungeonsInstall(slug, msAccount ? msAccount.id : '') })
   }
 
   const running = task && task.state === 'run'
@@ -251,21 +266,21 @@ function DungeonsActions({ game, st: store, onChanged }: { game: GameInfo; st: S
           <span style={{ width: Math.round(task.pct) + '%' }} />
         </div>
         <span className="gm-tag">{task.msg || task.label}</span>
-        <button className="btn md ghost" onClick={() => stopInstall(JOB)}>
+        <button className="btn md ghost" onClick={() => stopInstall(slug)}>
           Отменить
         </button>
       </div>
     )
   else if (installed)
     main = (
-      <button className="btn lg primary gm-play" data-sound="play" data-track="dungeons_play" onClick={() => dungeonsLaunch().catch(fail)}>
+      <button className="btn lg primary gm-play" data-sound="play" data-track="dungeons_play" data-id={slug} onClick={() => dungeonsLaunch(slug).catch(fail)}>
         <Icon id="i-play" /> Играть
       </button>
     )
   else
     main = (
-      <button className="btn lg primary" data-track="dungeons_install" onClick={install}>
-        <Icon id="i-download" /> {'Установить · ' + DUNGEONS_GB}
+      <button className="btn lg primary" data-track="dungeons_install" data-id={slug} onClick={install}>
+        <Icon id="i-download" /> {download ? 'Установить · ' + gbText(download) : 'Установить'}
       </button>
     )
 
@@ -273,19 +288,24 @@ function DungeonsActions({ game, st: store, onChanged }: { game: GameInfo; st: S
     <div className="gm-actions">
       {main}
       {!installed && !running && st && st.supported ? (
-        <button className="btn md secondary" data-track="game_buy" data-id="dungeons" onClick={() => void openUrl(gameBuyUrl('dungeons'))}>
+        <button className="btn md secondary" data-track="game_buy" data-id={slug} onClick={() => void openUrl(gameBuyUrl(slug))}>
           Купить в Blups
         </button>
       ) : null}
       {installed && !running ? (
         <>
-          <button className="btn md secondary" data-track="dungeons_update" onClick={install} aria-label={buildDate(st!.version)}>
+          <button className="btn md secondary" data-track="dungeons_update" data-id={slug} onClick={install} aria-label={buildDate(st!.version)}>
             <Icon id="i-restart" /> Обновить
           </button>
-          <button className="btn md ghost" onClick={() => void dungeonsOpenFolder()}>
+          <button className="btn md ghost" onClick={() => void dungeonsOpenFolder(slug).catch(fail)}>
             <PxIcon name="folder" size={18} /> Папка
           </button>
         </>
+      ) : null}
+      {slug === 'dungeons-2' ? (
+        <button className="btn md ghost" data-track="game_site" onClick={() => void openUrl(gameSite(game.slug))}>
+          <PxIcon name="book" size={18} /> Об игре
+        </button>
       ) : null}
     </div>
   )
@@ -293,9 +313,9 @@ function DungeonsActions({ game, st: store, onChanged }: { game: GameInfo; st: S
 
 function DungeonsMods() {
   const [st, setSt] = useState<DungeonsStatus | null>(null)
-  const done = useInstalls((s) => !!s.done[JOB])
+  const done = useInstalls((s) => !!s.done[MODS_JOB])
   const reload = useCallback(() => {
-    dungeonsStatus()
+    dungeonsStatus('dungeons')
       .then(setSt)
       .catch(() => setSt(null))
   }, [])
