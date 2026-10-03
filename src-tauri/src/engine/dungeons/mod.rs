@@ -1,22 +1,18 @@
 //! Minecraft Dungeons and Dungeons II next to Java Edition.
 //!
-//! Both games come from our own storage as a Microsoft Store build. That build
-//! does not ask for a licence by itself, so the server does: it checks the
-//! purchase for the player's Minecraft token and only then signs links to the
-//! files (trade-api `launcher/games`). Mods of the first game are Unreal .pak
-//! files in `Paks/~mods`, which the engine mounts after the base paks.
+//! Both games come from our own storage as a Microsoft Store build; the server
+//! signs the file links (trade-api `launcher/games`). Mods of the first game are
+//! Unreal .pak files in `Paks/~mods`, which the engine mounts after the base paks.
 
 use crate::engine::*;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::AppHandle;
 
-const ENTITLEMENTS: &str = "https://api.minecraftservices.com/entitlements/mcstore";
 const PARALLEL: usize = 6;
 const MODS_DIR: &str = "Dungeons/Content/Paks/~mods";
 const INSTALL_FILE: &str = ".millida-install.json";
@@ -24,7 +20,6 @@ const LEGACY_VERSION_FILE: &str = ".millida-version";
 const LEGACY_EXE: &str = "Dungeons.exe";
 const LEDGER_FILE: &str = ".millida-files.json";
 const DISABLED: &str = ".disabled";
-const SIGN_IN: &str = "Войдите в лаунчере аккаунтом Microsoft, на котором куплена игра";
 
 struct MirrorGame {
     slug: &'static str,
@@ -108,55 +103,6 @@ pub fn dungeons_status(slug: &str) -> Result<DungeonsStatus, String> {
     })
 }
 
-/// Entitlement names carry the product in them (`product_dungeons`,
-/// `product_legends`, …). Dungeons II is told apart from the first game by
-/// its own marker; Game Pass for PC unlocks all three spin-offs.
-fn owns_game(entitlements: &Value, slug: &str) -> bool {
-    entitlements["items"].as_array().is_some_and(|items| {
-        items.iter().filter_map(|i| i["name"].as_str()).any(|n| {
-            let n = n.to_ascii_lowercase().replace(['-', ' '], "_");
-            let sequel = ["dungeons2", "dungeons_2", "dungeonsii", "dungeons_ii"].iter().any(|m| n.contains(m));
-            n.contains("game_pass_pc")
-                || match slug {
-                    "dungeons" => n.contains("dungeons") && !sequel,
-                    "dungeons-2" => sequel,
-                    "legends" => n.contains("legends"),
-                    // С 07.06.2022 Java и Bedrock продаются вместе: у владельца Java есть и Bedrock.
-                    "bedrock" => n.contains("bedrock") || n == "product_minecraft" || n == "game_minecraft",
-                    _ => false,
-                }
-        })
-    })
-}
-
-/// `owned`, `not_owned`, `none` (no Microsoft session stored) or `unavailable`.
-pub async fn game_ownership(account_id: &str, slug: &str) -> Result<Value, String> {
-    let Some(token) = mc_token(account_id) else {
-        return Ok(serde_json::json!({ "status": "none" }));
-    };
-    let r = client().get(ENTITLEMENTS).bearer_auth(&token).send().await.map_err(|e| net_err(&e))?;
-    if r.status().as_u16() == 401 {
-        return Ok(serde_json::json!({ "status": "none" }));
-    }
-    if !r.status().is_success() {
-        return Ok(serde_json::json!({ "status": "unavailable" }));
-    }
-    let j: Value = r.json().await.map_err(|e| e.to_string())?;
-    let status = if owns_game(&j, slug) { "owned" } else { "not_owned" };
-    // Product names only (product_dungeons, …): no ids, signatures or tokens.
-    // They go to telemetry so the matcher can be checked against real
-    // purchases of Dungeons II and Legends without a Windows test machine.
-    let items: Vec<&str> = j["items"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|i| i["name"].as_str()).filter(|n| n.len() <= 64).collect())
-        .unwrap_or_default();
-    Ok(serde_json::json!({ "status": status, "items": items }))
-}
-
-pub async fn dungeons_ownership(account_id: &str) -> Result<Value, String> {
-    game_ownership(account_id, "dungeons").await
-}
-
 #[derive(Deserialize)]
 struct RemoteManifest {
     version: String,
@@ -180,46 +126,16 @@ struct RemoteBlob {
     encoding: String,
 }
 
-/// `Ok(Err(message))` is a 401: the Minecraft token has expired and one silent
-/// renewal is worth a try before the player is asked to sign in again.
-async fn request_manifest(slug: &str, token: &str) -> Result<Result<RemoteManifest, String>, String> {
+async fn fetch_manifest(slug: &str) -> Result<RemoteManifest, String> {
     let url = format!("{}/launcher/games/{}/manifest", MILLIDA_API, slug);
-    let r = client().post(&url).header("X-Minecraft-Token", token).send().await.map_err(|e| net_err(&e))?;
+    let r = client().post(&url).send().await.map_err(|e| net_err(&e))?;
     let status = r.status();
     let text = r.text().await.map_err(|e| net_err(&e))?;
     if status.is_success() {
         return serde_json::from_str(&text)
-            .map(Ok)
             .map_err(|_| "Сервер прислал непонятный список файлов игры. Обновите лаунчер".to_string());
     }
-    let msg = api_error_message(&text).unwrap_or_else(|| format!("Сервер загрузки игр ответил {}", status.as_u16()));
-    if status.as_u16() == 401 {
-        return Ok(Err(msg));
-    }
-    Err(msg)
-}
-
-async fn fresh_token(account_id: &str) -> Result<String, String> {
-    let r = ms_session_refresh(account_id).await?;
-    match r["status"].as_str() {
-        Some("ok") => mc_token(account_id).ok_or_else(|| SIGN_IN.to_string()),
-        Some("unavailable") => Err("Microsoft не ответил. Проверьте интернет и попробуйте ещё раз".into()),
-        _ => Err("Вход Microsoft устарел. Войдите в аккаунт Microsoft заново".into()),
-    }
-}
-
-async fn fetch_manifest(slug: &str, account_id: &str) -> Result<RemoteManifest, String> {
-    let id = account_id.trim();
-    if id.is_empty() {
-        return Err(SIGN_IN.into());
-    }
-    if let Some(token) = mc_token(id) {
-        if let Ok(m) = request_manifest(slug, &token).await? {
-            return Ok(m);
-        }
-    }
-    let token = fresh_token(id).await?;
-    request_manifest(slug, &token).await?
+    Err(api_error_message(&text).unwrap_or_else(|| format!("Сервер загрузки игр ответил {}", status.as_u16())))
 }
 
 struct FileJob {
@@ -401,19 +317,19 @@ fn remove_stale<'a>(root: &Path, previous: impl Iterator<Item = &'a String>, kee
 
 /// Installs or updates the game in place. Files already in place are kept, so
 /// an update downloads only what changed, and `~mods` is never touched.
-pub async fn dungeons_install(app: AppHandle, slug: String, account_id: String) -> Result<String, String> {
+pub async fn dungeons_install(app: AppHandle, slug: String) -> Result<String, String> {
     let g = mirror_game(&slug)?;
     if !cfg!(target_os = "windows") {
         return Err(format!("{} запускается только на Windows", g.title));
     }
     let job = Job::start(g.slug, g.title)?;
-    let res = install_inner(&app, &job, g, &account_id).await;
+    let res = install_inner(&app, &job, g).await;
     job.finish(&app, res)
 }
 
-async fn install_inner(app: &AppHandle, job: &Job, g: &MirrorGame, account_id: &str) -> Result<String, String> {
-    job.emit(app, 1.0, "Проверяем покупку");
-    let manifest = fetch_manifest(g.slug, account_id).await?;
+async fn install_inner(app: &AppHandle, job: &Job, g: &MirrorGame) -> Result<String, String> {
+    job.emit(app, 1.0, "Готовим загрузку");
+    let manifest = fetch_manifest(g.slug).await?;
     job.check()?;
 
     let root = game_dir(g);
@@ -563,29 +479,6 @@ pub fn dungeons_remove_mod(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ownership_is_per_game() {
-        let d1 = serde_json::json!({"items":[{"name":"product_minecraft"},{"name":"product_dungeons"}]});
-        let d2 = serde_json::json!({"items":[{"name":"product_dungeons2"}]});
-        let legends = serde_json::json!({"items":[{"name":"product_legends"}]});
-        let pass = serde_json::json!({"items":[{"name":"product_game_pass_pc"}]});
-        let java = serde_json::json!({"items":[{"name":"product_minecraft"},{"name":"game_minecraft"}]});
-        assert!(owns_game(&d1, "dungeons"));
-        assert!(!owns_game(&d1, "dungeons-2"), "the first game does not unlock the sequel");
-        assert!(owns_game(&d2, "dungeons-2"));
-        assert!(!owns_game(&d2, "dungeons"), "the sequel does not unlock the first game");
-        assert!(owns_game(&legends, "legends"));
-        assert!(!owns_game(&legends, "dungeons"));
-        for g in ["dungeons", "dungeons-2", "legends"] {
-            assert!(owns_game(&pass, g));
-            assert!(!owns_game(&java, g));
-        }
-        assert!(!owns_game(&serde_json::json!({}), "dungeons"));
-        assert!(owns_game(&java, "bedrock"), "a Java owner owns Bedrock since the 2022 bundle");
-        assert!(owns_game(&serde_json::json!({"items":[{"name":"product_minecraft_bedrock"}]}), "bedrock"));
-        assert!(!owns_game(&legends, "bedrock"));
-    }
 
     fn file(path: &str, size: u64, wire: u64, encoding: &str) -> RemoteFile {
         RemoteFile {

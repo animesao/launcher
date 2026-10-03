@@ -226,14 +226,10 @@ export interface DungeonsStatus {
   mods: DungeonsMod[]
 }
 
-export type DungeonsOwnership = 'owned' | 'not_owned' | 'none' | 'unavailable'
-
 export type MirrorGameSlug = 'dungeons' | 'dungeons-2'
 
 export const dungeonsStatus = (slug: MirrorGameSlug) => invoke<DungeonsStatus>('dungeons_status', { slug })
-export const dungeonsOwnership = (accountId: string) =>
-  invoke<{ status: DungeonsOwnership }>('dungeons_ownership', { accountId }).then((r) => r.status)
-export const dungeonsInstall = (slug: MirrorGameSlug, accountId: string) => invoke<string>('dungeons_install', { slug, accountId })
+export const dungeonsInstall = (slug: MirrorGameSlug) => invoke<string>('dungeons_install', { slug })
 export const dungeonsLaunch = (slug: MirrorGameSlug) => invoke<void>('dungeons_launch', { slug })
 export const dungeonsPickMods = () => invoke<number>('dungeons_pick_mods', {})
 export const dungeonsToggleMod = (name: string, enabled: boolean) => invoke<void>('dungeons_toggle_mod', { name, enabled })
@@ -253,25 +249,6 @@ export const storeGameOpen = (slug: string, via: 'steam' | 'steam-install' | 'st
   invoke<void>('store_game_open', { slug, via })
 export const storeGameInstall = (slug: string) => invoke<void>('store_game_install', { slug })
 export const bedrockJoin = (host: string, port: number) => invoke<void>('bedrock_join', { host, port })
-export const gameOwnership = (accountId: string, slug: string) =>
-  invoke<{ status: DungeonsOwnership; items?: string[] }>('game_ownership', { accountId, slug }).then((r) => {
-    reportEntitlements(r.items)
-    return r.status
-  })
-
-let entitlementsReported = false
-/**
- * Названия покупок Microsoft (product_*, game_*) — один раз за запуск, в
- * аналитику: как на самом деле называются Dungeons II и Legends, проверить
- * без Windows нельзя (29.09.2026). Только названия продуктов, без ников и токенов.
- */
-function reportEntitlements(items?: string[]) {
-  if (entitlementsReported || !items || !items.length) return
-  entitlementsReported = true
-  const data: Record<string, string | number> = { kind: 'entitlements', n: items.length }
-  items.slice(0, 14).forEach((name, i) => (data['e' + (i + 1)] = name))
-  void import('../lib/telemetry').then((t) => t.track('account_link', data)).catch(() => {})
-}
 
 export const addLocalFile = (profile: string, kind: string, path: string) =>
   invoke<string>('add_local_file', { profile, kind, path })
@@ -1228,6 +1205,7 @@ export const overlaySetCardMs = (ms: number) => invoke<void>('overlay_set_card_m
 export const overlayToast = (payload: OverlayCard) => invoke<void>('overlay_toast', { payload })
 export const overlayHide = () => invoke<void>('overlay_hide')
 export const overlayReady = () => invoke<void>('overlay_ready')
+export const overlayCleared = (seq: number) => invoke<void>('overlay_cleared', { seq })
 export const overlayHitAreas = (rects: number[][]) => invoke<void>('overlay_hit_areas', { rects })
 export const overlayOpen = (payload: OverlayCard, toLauncher = false) =>
   invoke<void>('overlay_open', { payload, toLauncher })

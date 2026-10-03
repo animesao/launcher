@@ -20,7 +20,6 @@ import {
 import { api } from '../lib/api'
 import { hasTauri } from '../ipc/tauri'
 import { GAMES, gameBuyUrl, gameHero, gamePoster, gameSite, useGame, type GameInfo } from '../lib/games'
-import { useAccounts } from '../state/accounts'
 import { runInstall, stopInstall, useInstalls } from '../state/installs'
 import { showToast } from '../state/ui'
 import { BedrockServers } from '../components/playhub/BedrockServers'
@@ -220,15 +219,12 @@ export function Actions({ game, st, onChanged }: { game: GameInfo; st: StoreGame
 }
 
 /*
- * Dungeons и Dungeons II качаем с нашего хранилища: сборка из Microsoft Store
- * сама лицензию не спрашивает, поэтому ссылки на файлы сервер выдаёт только
- * после проверки покупки на аккаунте Microsoft. Копия из Steam/Store — через магазин.
+ * Dungeons и Dungeons II качаем с нашего хранилища. Копия из Steam/Store — через магазин.
  */
 function DungeonsActions({ game, st: store, onChanged }: { game: GameInfo; st: StoreGameState | null; onChanged: () => void }) {
   const slug = game.slug as MirrorGameSlug
   const [st, setSt] = useState<DungeonsStatus | null>(null)
   const [download, setDownload] = useState<number | null>(null)
-  const msAccount = useAccounts((s) => s.list.find((a) => a.kind === 'microsoft') || null)
   const task = useInstalls((s) => s.tasks[slug])
   const done = useInstalls((s) => !!s.done[slug])
 
@@ -250,7 +246,7 @@ function DungeonsActions({ game, st: store, onChanged }: { game: GameInfo; st: S
   }, [slug])
 
   const install = () => {
-    runInstall({ key: slug, title: game.name, running: 'Скачиваем', run: () => dungeonsInstall(slug, msAccount ? msAccount.id : '') })
+    runInstall({ key: slug, title: game.name, running: 'Скачиваем', run: () => dungeonsInstall(slug) })
   }
 
   const running = task && task.state === 'run'

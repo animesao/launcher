@@ -6,13 +6,8 @@ pub async fn dungeons_status(slug: String) -> Result<engine::DungeonsStatus, Str
 }
 
 #[tauri::command]
-pub async fn dungeons_ownership(account_id: String) -> Result<serde_json::Value, String> {
-    engine::dungeons_ownership(&account_id).await
-}
-
-#[tauri::command]
-pub async fn dungeons_install(app: tauri::AppHandle, slug: String, account_id: String) -> Result<String, String> {
-    engine::dungeons_install(app, slug, account_id).await
+pub async fn dungeons_install(app: tauri::AppHandle, slug: String) -> Result<String, String> {
+    engine::dungeons_install(app, slug).await
 }
 
 #[tauri::command]
@@ -59,11 +54,6 @@ pub async fn store_game_open(slug: String, via: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn store_game_install(app: tauri::AppHandle, slug: String) -> Result<(), String> {
     engine::store_game_install(app, slug).await
-}
-
-#[tauri::command]
-pub async fn game_ownership(account_id: String, slug: String) -> Result<serde_json::Value, String> {
-    engine::game_ownership(&account_id, &slug).await
 }
 
 #[tauri::command]
